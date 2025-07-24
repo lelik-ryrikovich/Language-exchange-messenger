@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+  <title>Chats - Language Messenger</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1.6.1/dist/sockjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- Локальные библиотеки для криптографии -->
+  <script src="/js/crypto-js.min.js"></script>
+  <script src="/js/jsencrypt.min.js"></script>
+  <style>
+    .chat-item {
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    .chat-item:hover {
+      background-color: #f8f9fa;
+    }
+    .message {
+      margin-bottom: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      max-width: 70%;
+    }
+    .message-sent {
+      background-color: #007bff;
+      color: white;
+      margin-left: auto;
+    }
+    .message-received {
+      background-color: #e9ecef;
+      margin-right: auto;
+    }
+    .message-header {
+      font-size: 0.8rem;
+      margin-bottom: 4px;
+    }
+    #messages-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .translate-btn {
+      font-size: 0.8rem;
+      padding: 3px 10px;
+      margin-left: 5px;
+      border-radius: 4px;
+      transition: background-color 0.2s;
+    }
+    .message-sent .translate-btn {
+      background-color: #ffc107;
+      color: #212529;
+      border: 1px solid #e0a800;
+    }
+    .message-sent .translate-btn:hover {
+      background-color: #e0a800;
+      color: #212529;
+    }
+    .message-received .translate-btn {
+      background-color: #ffc107;
+      color: #212529;
+      border: 1px solid #e0a800;
+    }
+    .message-received .translate-btn:hover {
+      background-color: #e0a800;
+      color: #212529;
+    }
+    .translated-text {
+      font-style: italic;
+      font-weight: 500;
+      margin-top: 5px;
+      font-size: 0.95rem;
+    }
+    .message-sent .translated-text {
+      color: #ffffff;
+      text-shadow: 0 0 2px rgba(0, 0, 0, 0.5);
+    }
+    .message-received .translated-text {
+      color: #212529;
+      text-shadow: 0 0 1px rgba(255, 255, 255, 0.5);
+    }
+  </style>
+</head>
+<body>
+<div class="container mt-5">
+  <h2><a href="/web/home" class="text-decoration-none">Language Messenger</a></h2>
+  <ul class="nav nav-tabs" id="messengerTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+      <a class="nav-link" href="/web/home/search">Find People</a>
+    </li>
+    <li class="nav-item" role="presentation">
+      <a class="nav-link active" href="/web/home/chats">Chats</a>
+    </li>
+    <!--<li class="nav-item" role="presentation">
+      <a class="nav-link" href="/web/home/notifications">Notifications</a>-->
+    </li>
+    <li class="nav-item" role="presentation">
+      <a class="nav-link" href="/web/home/profile">Profile</a>
+    </li>
+  </ul>
+  <div class="mt-3">
+    <h4>Your Chats</h4>
+    <div class="list-group" id="chats-list">
+      <div th:each="chat : ${chats}"
+           class="list-group-item chat-item"
+           th:data-chat-id="${chat.id}"
+           th:text="${chat.chatName}">
+      </div>
+      <div th:if="${#lists.isEmpty(chats)}" class="list-group-item">
+        You don't have any chats yet. Find people to start chatting!
+      </div>
+    </div>
+  </div>
+  <!--<a href="/web/logout" class="btn btn-secondary mt-3">Logout</a>-->
+</div>
+
+<!-- Modal for chat messages -->
+<div class="modal fade" id="chatModal" tabindex="-1" aria-labelledby="chatModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="chatModalLabel">Chat</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="messages-container" style="height: 400px; overflow-y: auto; margin-bottom: 15px; padding: 10px;">
+          <p class="text-muted">Loading messages...</p>
+        </div>
+        <div class="input-group">
+          <input type="text" class="form-control" id="message-input" placeholder="Type your message...">
+          <button class="btn btn-primary" id="send-message">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script th:inline="javascript">
+  /*<![CDATA[*/
+  const currentUser = {
+    id: /*[[${user.id}]]*/ 0,
+    nickname: /*[[${user.nickname}]]*/ 'user'
+  };
+  /*]]>*/
+
+  let stompClient = null;
+  let currentChatId = null;
+  let currentSubscription = null;
+  let languageMap = {};
+  let recipientPublicKey = null;
+  let userPrivateKey = null;
+  let userPublicKey = null;
+
+  document.addEventListener('DOMContentLoaded', function() {
+    if (typeof CryptoJS === 'undefined' || typeof JSEncrypt === 'undefined') {
+      console.error('Crypto libraries not loaded');
+      alert('Failed to load encryption libraries. Please refresh the page.');
+      return;
+    }
+    console.log('Crypto libraries loaded');
+
+    // Загружаем публичный и приватный ключ текущего пользователя
+    Promise.all([
+      fetch('/web/home/api/user/public-key').then(response => {
+        if (!response.ok) throw new Error('Failed to load public key');
+        return response.json();
+      }),
+      fetch('/web/home/api/user/private-key').then(response => {
+        if (!response.ok) throw new Error('Failed to load private key');
+        return response.json();
+      })
+    ])
+            .then(([publicKeyData, privateKeyData]) => {
+              userPublicKey = publicKeyData.publicKey;
+              userPrivateKey = privateKeyData.privateKey;
+              console.log('User public key (first 50 chars):', userPublicKey.substring(0, 50));
+              console.log('User private key (first 50 chars):', userPrivateKey.substring(0, 50));
+              return fetch('/web/home/api/available-translation-languages');
+            })
+            .then(response => {
+              if (!response.ok) throw new Error('Failed to load translation languages');
+              return response.json();
+            })
+            .then(languages => {
+              languageMap = languages.reduce((map, lang) => {
+                map[lang.code] = lang.name;
+                return map;
+              }, {});
+              console.log('Translation languages loaded:', Object.keys(languageMap));
+              connectWebSocket();
+            })
+            .catch(error => {
+              console.error('Initialization error:', error);
+              languageMap = {};
+              alert('Failed to initialize chat: ' + error.message);
+            });
+
+    document.querySelectorAll('.chat-item').forEach(item => {
+      item.addEventListener('click', function() {
+        currentChatId = this.dataset.chatId;
+        const chatName = this.textContent;
+
+        if (currentSubscription) {
+          currentSubscription.unsubscribe();
+          currentSubscription = null;
+        }
+        fetch(`/web/home/api/chats/${currentChatId}/members`)
+                .then(response => {
+                  if (!response.ok) throw new Error('Failed to load chat members');
+                  return response.json();
+                })
+                .then(members => {
+                  const recipient = members.find(m => m.userId !== currentUser.id);
+                  if (!recipient) {
+                    throw new Error('Recipient not found');
+                  }
+                  console.log('Recipient found:', recipient.nickname);
+                  return fetch(`/web/home/api/users/${recipient.userId}/public-key`);
+                })
+                .then(response => {
+                  if (!response.ok) throw new Error('Failed to load public key');
+                  return response.json();
+                })
+                .then(data => {
+                  recipientPublicKey = data.publicKey;
+                  console.log('Recipient public key (first 50 chars):', recipientPublicKey.substring(0, 50));
+                  document.getElementById('chatModalLabel').textContent = chatName;
+                  loadMessages();
+                  subscribeToChat();
+                  const modal = new bootstrap.Modal(document.getElementById('chatModal'));
+                  modal.show();
+                })
+                .catch(error => {
+                  console.error('Error initializing chat:', error);
+                  alert('Failed to initialize chat: ' + error.message);
+                });
+      });
+    });
+
+    document.getElementById('chatModal').addEventListener('hidden.bs.modal', function() {
+      if (currentSubscription) {
+        currentSubscription.unsubscribe();
+        currentSubscription = null;
+      }
+      currentChatId = null;
+      recipientPublicKey = null;
+    });
+
+    document.getElementById('send-message').addEventListener('click', sendMessage);
+    document.getElementById('message-input').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        sendMessage();
+      }
+    });
+  });
+
+  function connectWebSocket() {
+    const socket = new SockJS('/ws');
+    stompClient = Stomp.over(socket);
+    stompClient.connect({}, function(frame) {
+      console.log('WebSocket connected: ' + frame);
+    }, function(error) {
+      console.error('WebSocket error: ' + error);
+      setTimeout(connectWebSocket, 5000);
+    });
+  }
+
+  function subscribeToChat() {
+    if (stompClient) {
+      currentSubscription = stompClient.subscribe('/topic/messages/' + currentChatId, function(message) {
+        const messageDto = JSON.parse(message.body);
+        if (!document.querySelector(`[data-message-id="${messageDto.id}"]`)) {
+          displayMessage(messageDto);
+        }
+      });
+    }
+  }
+
+  function loadMessages() {
+    fetch('/web/home/api/chats/' + currentChatId + '/messages')
+            .then(response => {
+              if (!response.ok) throw new Error('Failed to load messages');
+              return response.json();
+            })
+            .then(messages => {
+              const container = document.getElementById('messages-container');
+              container.innerHTML = '';
+              if (messages.length === 0) {
+                container.innerHTML = '<p class="text-muted">No messages yet</p>';
+              } else {
+                messages.forEach(message => displayMessage(message));
+              }
+              container.scrollTop = container.scrollHeight;
+            })
+            .catch(error => {
+              console.error('Error loading messages:', error);
+              document.getElementById('messages-container').innerHTML =
+                      '<p class="text-danger">Error loading messages</p>';
+            });
+  }
+
+  function encryptMessage(content) {
+    if (!recipientPublicKey || !userPublicKey) {
+      throw new Error('Public key not available');
+    }
+
+    console.log('Encrypting message:', content);
+    const aesKey = CryptoJS.lib.WordArray.random(16); // 128 бит для совместимости с JSEncrypt
+    const iv = CryptoJS.lib.WordArray.random(16);
+
+    const encrypted = CryptoJS.AES.encrypt(content, aesKey, {
+      iv: iv,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    });
+
+    const encryptRecipient = new JSEncrypt();
+    encryptRecipient.setPublicKey(recipientPublicKey);
+    const encryptedAesKeyRecipient = encryptRecipient.encrypt(aesKey.toString(CryptoJS.enc.Hex));
+    console.log('Encrypted AES key for recipient:', encryptedAesKeyRecipient);
+
+    const encryptSender = new JSEncrypt();
+    encryptSender.setPublicKey(userPublicKey);
+    const encryptedAesKeySender = encryptSender.encrypt(aesKey.toString(CryptoJS.enc.Hex));
+    console.log('Encrypted AES key for sender:', encryptedAesKeySender);
+
+    if (!encryptedAesKeyRecipient || !encryptedAesKeySender) {
+      throw new Error('RSA encryption failed');
+    }
+
+    return {
+      encryptedText: encrypted.ciphertext.toString(CryptoJS.enc.Base64),
+      encryptedAesKeyRecipient: encryptedAesKeyRecipient,
+      encryptedAesKeySender: encryptedAesKeySender,
+      iv: iv.toString(CryptoJS.enc.Base64)
+    };
+  }
+
+  function decryptMessage(messageDto) {
+    if (!userPrivateKey) {
+      console.error('Private key not available for message ID:', messageDto.id);
+      throw new Error('Private key not available');
+    }
+
+    console.log('Decrypting message ID:', messageDto.id);
+    const encryptedAesKey = messageDto.senderId === currentUser.id ?
+            messageDto.encryptedAesKeySender : messageDto.encryptedAesKeyRecipient;
+
+    if (!encryptedAesKey) {
+      console.error('No encrypted AES key available for message ID:', messageDto.id);
+      throw new Error('No encrypted AES key available');
+    }
+
+    console.log('Using private key (first 50 chars):', userPrivateKey.substring(0, 50));
+    console.log('Encrypted AES key:', encryptedAesKey);
+
+    const decrypt = new JSEncrypt();
+    decrypt.setPrivateKey(userPrivateKey);
+    const aesKeyHex = decrypt.decrypt(encryptedAesKey);
+    if (!aesKeyHex) {
+      console.error('RSA decryption failed for key:', encryptedAesKey);
+      throw new Error('RSA decryption failed');
+    }
+    console.log('Decrypted AES key (hex):', aesKeyHex);
+
+    const aesKey = CryptoJS.enc.Hex.parse(aesKeyHex);
+
+    const decrypted = CryptoJS.AES.decrypt(
+            { ciphertext: CryptoJS.enc.Base64.parse(messageDto.encryptedText) },
+            aesKey,
+            {
+              iv: CryptoJS.enc.Base64.parse(messageDto.iv),
+              mode: CryptoJS.mode.CBC,
+              padding: CryptoJS.pad.Pkcs7
+            }
+    );
+
+    const decryptedText = decrypted.toString(CryptoJS.enc.Utf8);
+    if (!decryptedText) {
+      console.error('AES decryption failed for message ID:', messageDto.id);
+      throw new Error('AES decryption failed');
+    }
+    return decryptedText;
+  }
+
+  function sendMessage() {
+    const messageInput = document.getElementById('message-input');
+    const sendButton = document.getElementById('send-message');
+    const content = messageInput.value.trim();
+    if (content && currentChatId && stompClient) {
+      try {
+        messageInput.disabled = true;
+        sendButton.disabled = true;
+        sendButton.textContent = 'Encrypting...';
+        const encryptedData = encryptMessage(content);
+        const messageDto = {
+          senderId: currentUser.id,
+          encryptedText: encryptedData.encryptedText,
+          encryptedAesKeyRecipient: encryptedData.encryptedAesKeyRecipient,
+          encryptedAesKeySender: encryptedData.encryptedAesKeySender,
+          iv: encryptedData.iv
+        };
+        console.log('Sending message:', messageDto);
+        stompClient.send("/app/chat/" + currentChatId, {}, JSON.stringify(messageDto));
+        messageInput.value = '';
+      } catch (error) {
+        console.error('Encryption error:', error);
+        alert('Failed to encrypt message: ' + error.message);
+      } finally {
+        messageInput.disabled = false;
+        sendButton.disabled = false;
+        sendButton.textContent = 'Send';
+      }
+    }
+  }
+
+  function displayMessage(messageDto) {
+    const container = document.getElementById('messages-container');
+    if (document.querySelector(`[data-message-id="${messageDto.id}"]`)) {
+      return;
+    }
+    if (container.querySelector('.text-muted')) {
+      container.innerHTML = '';
+    }
+
+    let displayContent;
+    if (messageDto.encryptedText) {
+      try {
+        displayContent = decryptMessage(messageDto);
+      } catch (error) {
+        console.error('Decryption error:', error);
+        displayContent = '[Failed to decrypt message]';
+      }
+    } else {
+      displayContent = '[No content available]';
+    }
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${messageDto.senderId === currentUser.id ? 'message-sent' : 'message-received'}`;
+    messageDiv.setAttribute('data-message-id', messageDto.id);
+
+    const header = document.createElement('div');
+    header.className = 'message-header';
+    let dateString = 'Just now';
+    try {
+      const date = new Date(messageDto.timestamp);
+      if (!isNaN(date.getTime())) {
+        dateString = date.toLocaleString();
+      }
+    } catch (error) {
+      console.error('Error parsing date:', error);
+    }
+    //header.textContent = `${messageDto.senderName} • ${dateString} ${messageDto.encryptedText ? '🔒' : ''}`;
+    header.textContent = `${messageDto.senderName} • ${dateString} ${messageDto.encryptedText ? '' : ''}`;
+
+    const contentWrapper = document.createElement('div');
+    const content = document.createElement('div');
+    content.textContent = displayContent;
+
+    const translateBtn = document.createElement('button');
+    translateBtn.className = 'btn translate-btn';
+    translateBtn.textContent = 'Translate';
+    translateBtn.onclick = function() {
+      translateBtn.disabled = true;
+      translateBtn.textContent = 'Translating...';
+      fetch('/web/home/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: displayContent })
+      })
+              .then(response => response.json())
+              .then(data => {
+                if (data.error) {
+                  alert('Translation failed: ' + data.error);
+                  return;
+                }
+                let translatedDiv = messageDiv.querySelector('.translated-text');
+                if (!translatedDiv) {
+                  translatedDiv = document.createElement('div');
+                  translatedDiv.className = 'translated-text';
+                  contentWrapper.appendChild(translatedDiv);
+                }
+                const detectedLanguage = languageMap[data.detectedLanguage] || data.detectedLanguage;
+                translatedDiv.textContent = `Translated${detectedLanguage !== 'unknown' ? ' from ' + detectedLanguage : ''}: ${data.translatedText}`;
+              })
+              .catch(error => {
+                console.error('Error translating:', error);
+                alert('Translation failed');
+              })
+              .finally(() => {
+                translateBtn.disabled = false;
+                translateBtn.textContent = 'Translate';
+              });
+    };
+
+    contentWrapper.appendChild(content);
+    if (messageDto.translatedContent) {
+      const translatedDiv = document.createElement('div');
+      translatedDiv.className = 'translated-text';
+      const detectedLanguage = languageMap[messageDto.detectedLanguage] || messageDto.detectedLanguage;
+      translatedDiv.textContent = `Translated${detectedLanguage !== 'unknown' ? ' from ' + detectedLanguage : ''}: ${messageDto.translatedContent}`;
+      contentWrapper.appendChild(translatedDiv);
+    }
+    contentWrapper.appendChild(translateBtn);
+
+    messageDiv.appendChild(header);
+    messageDiv.appendChild(contentWrapper);
+    container.appendChild(messageDiv);
+    container.scrollTop = container.scrollHeight;
+  }
+</script>
+</body>
+</html>
