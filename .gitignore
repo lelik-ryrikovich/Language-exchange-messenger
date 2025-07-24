@@ -1,0 +1,14 @@
+### Maven ###
+target/
+
+### Maven Wrapper ###
+.mvn/wrapper/
+mvnw
+mvnw.cmd
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+
+### System ###
+.DS_Store
