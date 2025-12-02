@@ -42,7 +42,7 @@
 
 1.  **Клонируйте репозиторий:**
     ```bash
-    git clone lelik-ryrikovich/Language-exchange-messenger
+    git clone https://github.com/lelik-ryrikovich/Language-exchange-messenger.git
     cd language-exchange-messenger
     ```
 
